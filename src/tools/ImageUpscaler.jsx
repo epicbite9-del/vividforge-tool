@@ -1,268 +1,200 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useCallback } from 'react';
 import { useDropzone } from 'react-dropzone';
-import { Upload, Activity, Download, RefreshCw, Layers, Droplet } from 'lucide-react';
-import pica from 'pica';
-import Loader from '../components/Loader';
+import Upscaler from 'upscaler';
+import { 
+  Upload, 
+  Download, 
+  Zap, 
+  Image as ImageIcon, 
+  AlertCircle,
+  CheckCircle2,
+  ScanSearch
+} from 'lucide-react';
+import { clsx } from 'clsx';
+import { twMerge } from 'tailwind-merge';
+
+function cn(...inputs) {
+  return twMerge(clsx(inputs));
+}
 
 const ImageUpscaler = () => {
-  const [originalUrl, setOriginalUrl] = useState(null);
-  const [finalUrl, setFinalUrl] = useState(null);
-  const [loading, setLoading] = useState(false);
-  
-  // Settings
-  const [scaleFactor, setScaleFactor] = useState(2);
-  const [clarity, setClarity] = useState(150); // Sharpness (Unblur)
-  const [denoise, setDenoise] = useState(20);  // Smoothness (Noise Removal)
-  
-  const [sliderPosition, setSliderPosition] = useState(50);
-  const [currentFile, setCurrentFile] = useState(null);
-  const containerRef = useRef(null);
+  const [file, setFile] = useState(null);
+  const [previewUrl, setPreviewUrl] = useState(null);
+  const [processedUrl, setProcessedUrl] = useState(null);
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [progress, setProgress] = useState(0);
 
-  // THE HYBRID ENGINE (Smooth + Sharpen)
-  const processUpscale = async (file) => {
-    if (!file) return;
-    setLoading(true);
-    setFinalUrl(null);
-    setOriginalUrl(URL.createObjectURL(file));
-
-    try {
-      const img = new Image();
-      img.src = URL.createObjectURL(file);
-      await new Promise(r => img.onload = r);
-
-      // 1. PRE-PROCESSING (Denoise / Smoothing)
-      // We draw the original image onto a canvas with a blur filter
-      // to kill noise BEFORE we upscale.
-      const preCanvas = document.createElement('canvas');
-      preCanvas.width = img.width;
-      preCanvas.height = img.height;
-      const preCtx = preCanvas.getContext('2d');
-
-      // Smart Denoise Logic:
-      // We apply a slight blur based on the 'Denoise' slider.
-      // 0 = No blur, 100 = 2px blur (strong smoothing)
-      if (denoise > 0) {
-          preCtx.filter = `blur(${denoise * 0.02}px)`; 
-      }
-      preCtx.drawImage(img, 0, 0);
-
-      // 2. UPSCALING (Lanczos3)
-      const targetWidth = img.width * scaleFactor;
-      const targetHeight = img.height * scaleFactor;
-      
-      const canvas = document.createElement('canvas');
-      canvas.width = targetWidth;
-      canvas.height = targetHeight;
-
-      const picaRunner = pica();
-      
-      // 3. POST-PROCESSING (Clarify / Unblur)
-      // We increase the threshold based on Denoise level.
-      // If Denoise is high, we tell the sharpener to IGNORE small grains (Threshold increases).
-      const smartThreshold = 1 + (denoise * 0.5); 
-
-      await picaRunner.resize(preCanvas, canvas, {
-        unsharpAmount: clarity, // Strength of "Unblur"
-        unsharpRadius: 0.6 + (scaleFactor * 0.1), // Radius adjusts with scale
-        unsharpThreshold: smartThreshold // Prevents sharpening the noise we just blurred
-      });
-
-      const blob = await picaRunner.toBlob(canvas, 'image/png', 1.0);
-      setFinalUrl(URL.createObjectURL(blob));
-      setLoading(false);
-
-    } catch (err) {
-      console.error(err);
-      alert("Error processing image.");
-      setLoading(false);
+  const onDrop = useCallback((acceptedFiles) => {
+    const uploadedFile = acceptedFiles[0];
+    if (uploadedFile) {
+      const objectUrl = URL.createObjectURL(uploadedFile);
+      setFile(uploadedFile);
+      setPreviewUrl(objectUrl);
+      setProcessedUrl(null);
+      setProgress(0);
     }
-  };
+  }, []);
 
-  // Debounce processing to allow slider dragging without lag
-  useEffect(() => {
-    if (currentFile && !loading) {
-       const timer = setTimeout(() => {
-           processUpscale(currentFile);
-       }, 400); // 400ms delay
-       return () => clearTimeout(timer);
-    }
-  }, [clarity, denoise, scaleFactor]);
-
-  const handleSliderMove = (e) => {
-    if (!containerRef.current) return;
-    const rect = containerRef.current.getBoundingClientRect();
-    const x = Math.max(0, Math.min(e.clientX - rect.left, rect.width));
-    setSliderPosition((x / rect.width) * 100);
-  };
-
-  const { getRootProps, getInputProps } = useDropzone({
+  const { getRootProps, getInputProps, isDragActive } = useDropzone({
+    onDrop,
     accept: { 'image/*': [] },
     multiple: false,
-    onDrop: (files) => {
-        setCurrentFile(files[0]);
-        processUpscale(files[0]);
-    }
   });
 
+  const handleUpscale = async () => {
+    if (!previewUrl) return;
+    setIsProcessing(true);
+    setProgress(10); // Start progress
+
+    try {
+      const upscaler = new Upscaler({
+        model: 'default-model', // Uses standard GAN model
+      });
+
+      // Update progress for UX
+      const timer = setInterval(() => {
+        setProgress((prev) => (prev < 90 ? prev + 10 : prev));
+      }, 500);
+
+      // Perform Upscaling
+      // UpscalerJS returns a Base64 string (data:image/png...), NOT a Blob
+      const upscaledDataSrc = await upscaler.upscale(previewUrl, {
+        patchSize: 64, // Process in chunks to avoid freezing browser
+        padding: 2
+      });
+      
+      clearInterval(timer);
+      setProgress(100);
+      
+      // FIX: Use the data string directly, do NOT use createObjectURL
+      setProcessedUrl(upscaledDataSrc); 
+      
+    } catch (error) {
+      console.error("Upscaling failed:", error);
+      alert("Upscaling failed. Please try a smaller image.");
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  const handleDownload = () => {
+    if (!processedUrl) return;
+    const link = document.createElement('a');
+    link.href = processedUrl;
+    link.download = `upscaled_vividforge.png`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
   return (
-    <div className="max-w-7xl mx-auto p-4 md:p-8">
-      <div className="text-center mb-8">
-        <h1 className="text-4xl font-extrabold text-transparent bg-clip-text bg-gradient-to-r from-violet-400 to-purple-600 mb-2">
-            Smart Image Upscaler
+    <div className="min-h-screen bg-[#0a0a0a] text-gray-200 p-6 md:p-12 font-sans">
+      <header className="max-w-7xl mx-auto mb-10">
+        <h1 className="text-4xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-violet-400 to-fuchsia-400">
+          AI Image Upscaler
         </h1>
-        <p className="text-gray-400">Denoise • Unblur • Upscale</p>
-      </div>
+        <p className="text-gray-500 mt-2 flex items-center gap-2">
+          <Zap size={16} className="text-yellow-400" />
+          Enhance resolution up to 200% using Neural Networks.
+        </p>
+      </header>
 
-      {!originalUrl ? (
-        <div className="max-w-xl mx-auto">
-            <div className="flex justify-center gap-4 mb-8">
-                <button onClick={() => setScaleFactor(2)} className={`flex flex-col items-center p-4 rounded-xl border-2 transition-all w-32 ${scaleFactor === 2 ? 'border-violet-500 bg-violet-500/10' : 'border-gray-700 bg-dark-800 opacity-60'}`}>
-                    <span className="text-2xl font-black text-white">2x</span>
-                    <span className="text-xs text-gray-400">Standard</span>
-                </button>
-                <button onClick={() => setScaleFactor(4)} className={`flex flex-col items-center p-4 rounded-xl border-2 transition-all w-32 ${scaleFactor === 4 ? 'border-violet-500 bg-violet-500/10' : 'border-gray-700 bg-dark-800 opacity-60'}`}>
-                    <span className="text-2xl font-black text-white">4x</span>
-                    <span className="text-xs text-violet-300">Ultra HD</span>
-                </button>
+      <main className="max-w-7xl mx-auto">
+        {!file ? (
+          <div 
+            {...getRootProps()} 
+            className={cn(
+              "border-2 border-dashed rounded-3xl h-96 flex flex-col items-center justify-center transition-all duration-300 cursor-pointer group backdrop-blur-sm",
+              isDragActive 
+                ? "border-fuchsia-500 bg-fuchsia-500/10" 
+                : "border-white/10 bg-white/5 hover:border-fuchsia-500/50 hover:bg-white/10"
+            )}
+          >
+            <input {...getInputProps()} />
+            <div className="p-6 rounded-full bg-gradient-to-tr from-violet-600 to-fuchsia-600 mb-6 shadow-lg shadow-violet-900/50 group-hover:scale-110 transition-transform">
+              <Upload size={40} className="text-white" />
+            </div>
+            <h3 className="text-2xl font-semibold text-white mb-2">Upload Low-Res Image</h3>
+            <p className="text-gray-400">We'll add pixels where they're missing.</p>
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+            
+            {/* Original */}
+            <div className="space-y-4">
+              <div className="flex items-center justify-between">
+                <span className="text-sm text-gray-400 uppercase font-bold tracking-wider">Original</span>
+              </div>
+              <div className="bg-black/40 border border-white/10 rounded-2xl p-4 h-[500px] flex items-center justify-center relative">
+                 <img src={previewUrl} className="max-w-full max-h-full object-contain" />
+              </div>
             </div>
 
-            <div {...getRootProps()} className="border-2 border-dashed border-gray-700 bg-dark-800/50 rounded-3xl p-20 text-center cursor-pointer hover:border-violet-500 hover:bg-dark-800 transition group">
-                <input {...getInputProps()} />
-                <Upload className="mx-auto h-12 w-12 text-gray-500 mb-4 group-hover:text-violet-500" />
-                <p className="text-xl text-gray-300">Drop image to Enhance</p>
+            {/* Upscaled Result */}
+            <div className="space-y-4">
+              <div className="flex items-center justify-between h-6">
+                <span className="text-sm text-fuchsia-400 uppercase font-bold tracking-wider">
+                  {processedUrl ? "AI Enhanced (2x)" : "Preview"}
+                </span>
+                {isProcessing && <span className="text-xs text-white animate-pulse">Processing: {progress}%</span>}
+              </div>
+
+              <div className="bg-black/40 border border-white/10 rounded-2xl p-4 h-[500px] flex items-center justify-center relative overflow-hidden">
+                 
+                 {/* Empty State */}
+                 {!processedUrl && !isProcessing && (
+                    <div className="text-center">
+                       <ScanSearch size={48} className="mx-auto text-gray-600 mb-4" />
+                       <button 
+                         onClick={handleUpscale}
+                         className="bg-white text-black px-6 py-2 rounded-full font-bold hover:bg-gray-200 transition-colors"
+                       >
+                         Start Upscaling
+                       </button>
+                    </div>
+                 )}
+
+                 {/* Loading State */}
+                 {isProcessing && (
+                    <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/60 backdrop-blur-sm z-10">
+                        <div className="w-64 h-2 bg-gray-700 rounded-full overflow-hidden mb-4">
+                           <div 
+                             className="h-full bg-gradient-to-r from-violet-500 to-fuchsia-500 transition-all duration-300"
+                             style={{ width: `${progress}%` }}
+                           />
+                        </div>
+                        <p className="text-white font-mono animate-pulse">Running Neural Network...</p>
+                    </div>
+                 )}
+
+                 {/* Result */}
+                 {processedUrl && (
+                    <img src={processedUrl} className="max-w-full max-h-full object-contain shadow-2xl shadow-fuchsia-900/20" />
+                 )}
+              </div>
+
+              {processedUrl && (
+                <div className="flex gap-4">
+                   <button 
+                     onClick={handleDownload}
+                     className="flex-1 py-3 bg-gradient-to-r from-violet-600 to-fuchsia-600 text-white rounded-xl font-bold hover:opacity-90 transition-opacity flex items-center justify-center gap-2"
+                   >
+                     <Download size={18} /> Download High-Res
+                   </button>
+                   <button 
+                     onClick={() => setFile(null)}
+                     className="px-6 py-3 border border-white/10 rounded-xl hover:bg-white/5 transition-colors"
+                   >
+                     Reset
+                   </button>
+                </div>
+              )}
             </div>
-        </div>
-      ) : (
-        <div className="grid lg:grid-cols-[320px_1fr] gap-8 items-start">
-           
-           {/* CONTROLS */}
-           <div className="bg-dark-800 border border-white/10 rounded-2xl p-6 space-y-8 sticky top-24">
-              
-              <div className="bg-violet-500/10 border border-violet-500/20 p-4 rounded-xl text-center">
-                  <p className="text-xs text-violet-300 uppercase font-bold mb-1">Active Mode</p>
-                  <p className="text-2xl font-black text-white">{scaleFactor}x Smart-Scale</p>
-              </div>
-
-              {/* SLIDER 1: CLARITY */}
-              <div>
-                <label className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-2 flex items-center gap-2">
-                    <Activity size={14} className="text-blue-400"/> Unblur (Clarity)
-                </label>
-                <div className="flex items-center gap-4">
-                    <span className="text-xs text-gray-500">Soft</span>
-                    <input 
-                        type="range" min="0" max="250" 
-                        value={clarity}
-                        onChange={(e) => setClarity(parseInt(e.target.value))}
-                        className="w-full accent-blue-500 h-2 bg-dark-900 rounded-lg appearance-none cursor-pointer"
-                    />
-                    <span className="text-xs text-white">Sharp</span>
-                </div>
-              </div>
-
-              {/* SLIDER 2: DENOISE */}
-              <div>
-                <label className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-2 flex items-center gap-2">
-                    <Droplet size={14} className="text-pink-400"/> Denoise (Smoothness)
-                </label>
-                <div className="flex items-center gap-4">
-                    <span className="text-xs text-gray-500">Grainy</span>
-                    <input 
-                        type="range" min="0" max="100" 
-                        value={denoise}
-                        onChange={(e) => setDenoise(parseInt(e.target.value))}
-                        className="w-full accent-pink-500 h-2 bg-dark-900 rounded-lg appearance-none cursor-pointer"
-                    />
-                    <span className="text-xs text-white">Smooth</span>
-                </div>
-                <p className="text-[10px] text-gray-500 mt-2">
-                   Increase to remove noise and smooth skin.
-                </p>
-              </div>
-
-              <hr className="border-white/10"/>
-
-              <button 
-                onClick={() => { setOriginalUrl(null); setFinalUrl(null); setCurrentFile(null); }}
-                className="w-full py-3 border border-gray-600 text-gray-300 hover:bg-dark-700 rounded-xl font-medium transition flex items-center justify-center gap-2"
-             >
-                <RefreshCw size={18} /> Start Over
-             </button>
-           </div>
-
-           {/* PREVIEW */}
-           <div className="min-h-[500px] flex flex-col items-center w-full">
-             
-             {loading && (
-                <div className="w-full h-[500px] bg-dark-800 rounded-2xl border border-white/10 flex flex-col items-center justify-center">
-                    <Loader text="Processing..." />
-                </div>
-             )}
-
-             {finalUrl && !loading && (
-               <div className="w-full space-y-6 animate-fade-in">
-                 {/* COMPARISON SLIDER */}
-                 <div 
-                    ref={containerRef}
-                    onMouseMove={handleSliderMove}
-                    onTouchMove={(e) => {
-                        const touch = e.touches[0];
-                        const rect = containerRef.current.getBoundingClientRect();
-                        const x = Math.max(0, Math.min(touch.clientX - rect.left, rect.width));
-                        setSliderPosition((x / rect.width) * 100);
-                    }}
-                    className="relative w-full h-[65vh] bg-black/50 rounded-2xl overflow-hidden cursor-col-resize border border-white/10 select-none shadow-2xl"
-                 >
-                    {/* AFTER */}
-                    <img src={finalUrl} className="absolute top-0 left-0 w-full h-full object-contain" alt="After" />
-                    <div className="absolute top-4 right-4 bg-violet-600/90 text-white px-3 py-1 rounded-full text-xs font-bold shadow-lg z-10">
-                        RESULT
-                    </div>
-
-                    {/* BEFORE */}
-                    <div 
-                        className="absolute top-0 left-0 h-full overflow-hidden border-r-2 border-white/50 bg-black/50"
-                        style={{ width: `${sliderPosition}%` }}
-                    >
-                        <img 
-                            src={originalUrl} 
-                            className="absolute top-0 left-0 w-full h-full object-contain max-w-none" 
-                            style={{ width: containerRef.current?.getBoundingClientRect().width || '100%' }}
-                            alt="Before" 
-                        />
-                        <div className="absolute top-4 left-4 bg-gray-800/90 text-white px-3 py-1 rounded-full text-xs font-bold shadow-lg z-10">
-                            ORIGINAL
-                        </div>
-                    </div>
-
-                    <div 
-                        className="absolute top-0 bottom-0 w-8 -ml-4 flex items-center justify-center pointer-events-none"
-                        style={{ left: `${sliderPosition}%` }}
-                    >
-                        <div className="w-8 h-8 bg-white rounded-full shadow-xl flex items-center justify-center">
-                            <Layers size={16} className="text-gray-600" />
-                        </div>
-                    </div>
-                 </div>
-
-                 <div className="flex justify-between items-center bg-dark-800 p-4 rounded-xl border border-white/10">
-                    <div className="text-gray-400 text-sm">
-                        Result: <span className="text-violet-400 font-bold">{scaleFactor}x Resolution</span>
-                    </div>
-                    <a 
-                        href={finalUrl} 
-                        download={`vividforge-${scaleFactor}x.png`}
-                        className="bg-violet-600 hover:bg-violet-700 text-white px-8 py-3 rounded-xl font-bold shadow-lg flex items-center gap-2 transition hover:-translate-y-1"
-                    >
-                        <Download size={20} /> Download Result
-                    </a>
-                 </div>
-               </div>
-             )}
-           </div>
-        </div>
-      )}
+          </div>
+        )}
+      </main>
     </div>
   );
 };
+
 export default ImageUpscaler;
